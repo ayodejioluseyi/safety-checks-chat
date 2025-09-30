@@ -1,8 +1,10 @@
 "use client";
+import Image from "next/image";
+import Link from "next/link";
 import { useState } from "react";
 
 type ChatRole = "user" | "assistant";
-type ChatMsg = { role: ChatRole; content: string };
+type ChatMsg = { role: ChatRole; content: string; ts: number };
 
 type ChatAPIResponse = {
   answer?: string;
@@ -11,31 +13,66 @@ type ChatAPIResponse = {
   error?: string;
 };
 
+type SuggestionAPIResponse = { suggestions: string[]; error?: string };
+
+function formatTS(ts: number): string {
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/London",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date(ts));
+}
+
 export default function Home() {
   const [input, setInput] = useState<string>("");
   const [msgs, setMsgs] = useState<ChatMsg[]>([
     {
       role: "assistant",
       content:
-        'Hi! Ask me about food-safety checks (e.g. “Opening Check for restaurant 74 on 29/09/2025?”)',
+        'Welcome to SafeIntel AI. Ask about food-safety checks, e.g. “Opening Check for restaurant 74 on 20/09/2025?”',
+      ts: Date.now(),
     },
   ]);
   const [loading, setLoading] = useState<boolean>(false);
+  const [chips, setChips] = useState<string[]>([]);
 
-  async function send() {
-    const text = input.trim();
+  async function fetchSuggestions(lastUserText: string) {
+    try {
+      const res = await fetch("/api/suggestions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lastUserText }),
+      });
+      const data = (await res.json()) as SuggestionAPIResponse;
+      setChips(data.suggestions ?? []);
+    } catch {
+      setChips([]);
+    }
+  }
+
+  async function send(prompt?: string) {
+    const text = (prompt ?? input).trim();
     if (!text) return;
 
-    setMsgs((m) => [...m, { role: "user", content: text }]);
+    const now = Date.now();
+    setMsgs((m) => [...m, { role: "user", content: text, ts: now }]);
     setInput("");
     setLoading(true);
+    setChips([]); // clear any previous chips
 
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          messages: [...msgs, { role: "user", content: text }],
+          messages: [...msgs, { role: "user", content: text, ts: now }].map((x) => ({
+            role: x.role,
+            content: x.content,
+          })),
         }),
       });
 
@@ -44,57 +81,115 @@ export default function Home() {
         data.answer ??
         (data.error ? `Error: ${data.error}` : "Sorry, no answer.");
 
-      setMsgs((m) => [...m, { role: "assistant", content: reply }]);
+      setMsgs((m) => [
+        ...m,
+        { role: "assistant", content: reply, ts: Date.now() },
+      ]);
+
+      // If we likely had no match, surface suggestions
+      const noContext = !data.used || data.used.length === 0 || /i don't have that record/i.test(reply);
+      if (noContext) {
+        void fetchSuggestions(text);
+      }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Unknown error";
       setMsgs((m) => [
         ...m,
-        { role: "assistant", content: `Error: ${message}` },
+        { role: "assistant", content: `Error: ${message}`, ts: Date.now() },
       ]);
+      // optional: try suggestions even on error
+      void fetchSuggestions(input);
     } finally {
       setLoading(false);
     }
   }
 
   return (
-    <main className="min-h-screen max-w-2xl mx-auto p-6 flex flex-col gap-4">
-      <h1 className="text-2xl font-bold">Safety Checks Assistant</h1>
+    <div className="si-page">
+      {/* Sticky header */}
+      <header className="si-header">
+        <Link href="/" aria-label="SafeIntel AI home">
+          <Image
+            className="si-header__logo"
+            src="/safeintel-logo.png"
+            alt="SafeIntel AI"
+            width={1024}
+            height={268}
+            priority
+          />
+        </Link>
+        <div className="si-header__title">AI</div>
+      </header>
 
-      <div className="flex-1 flex flex-col gap-3 overflow-y-auto border rounded p-3">
-        {msgs.map((m, i) => (
-          <div key={i} className={m.role === "user" ? "text-right" : "text-left"}>
-            <div
-              className={`inline-block px-3 py-2 rounded-2xl ${
-                m.role === "user" ? "bg-gray-200" : "bg-gray-100"
-              }`}
-            >
-              {m.content}
+      {/* Main content */}
+      <main className="si-main">
+        <div className="si-chat" role="log" aria-live="polite">
+          {msgs.map((m, i) => (
+            <div key={i} style={{ display: "flex", flexDirection: "column" }}>
+              <div
+                className={`si-bubble ${
+                  m.role === "user" ? "si-bubble--user" : "si-bubble--assistant"
+                }`}
+              >
+                {m.content}
+              </div>
+              <div
+                className={`si-meta ${
+                  m.role === "user" ? "si-meta--user" : "si-meta--assistant"
+                }`}
+              >
+                {formatTS(m.ts)}
+              </div>
             </div>
+          ))}
+          {loading && (
+            <div style={{ display: "flex", flexDirection: "column" }}>
+              <div className="si-bubble si-bubble--assistant">Thinking…</div>
+              <div className="si-meta si-meta--assistant">{formatTS(Date.now())}</div>
+            </div>
+          )}
+        </div>
+
+        {/* Suggestion chips (show when present) */}
+        {chips.length > 0 && (
+          <div className="si-chips" role="navigation" aria-label="Suggestions">
+            {chips.map((c, idx) => (
+              <button
+                key={idx}
+                className="si-chip"
+                onClick={() => void send(c)}
+                title={c}
+              >
+                {c}
+              </button>
+            ))}
           </div>
-        ))}
-        {loading && <div className="text-sm opacity-60">Thinking…</div>}
-      </div>
+        )}
 
-      <div className="flex gap-2">
-        <input
-          className="flex-1 border rounded px-3 py-2"
-          placeholder='Ask: "Fridge PM for The Picture Drome on 29/09/2025?"'
-          value={input}
-          onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-            setInput(e.target.value)
-          }
-          onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
-            if (e.key === "Enter") void send();
-          }}
-        />
-        <button className="border rounded px-4 py-2" onClick={() => void send()}>
-          Send
-        </button>
-      </div>
+        <div className="si-composer">
+          <input
+            className="si-input"
+            placeholder='Try: "Fridge PM for The Picture Drome on 29/09/2025?"'
+            value={input}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+              setInput(e.target.value)
+            }
+            onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
+              if (e.key === "Enter") void send();
+            }}
+            aria-label="Ask a question"
+          />
+          <button
+            className="si-button"
+            onClick={() => void send()}
+            disabled={loading || !input.trim()}
+          >
+            Ask SafeIntel
+          </button>
+        </div>
 
-      <p className="text-xs opacity-70">
-        Answers come strictly from your CSV-derived data.
-      </p>
-    </main>
+        <p className="si-hint">Answers come strictly from your CSV-derived data.</p>
+      </main>
+    </div>
   );
 }
