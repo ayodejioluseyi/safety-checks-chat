@@ -6,7 +6,8 @@
     "dev": "next dev --turbopack",
     "build": "next build --turbopack",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "build:kb:bin": "node scripts/build-knowledge-bin.mjs"
   },
   "dependencies": {
     "chrono-node": "^2.9.0",

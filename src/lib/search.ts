@@ -6,52 +6,67 @@ export interface KBMeta {
   restaurant_name?: string;
   date_iso?: string;
   type?: string;
-  // allow other metadata fields without using `any`
   [k: string]: unknown;
 }
-
-export interface KBItem {
-  id: string;
-  text: string;
-  embedding: number[];
-  meta: KBMeta;
-  score?: number;
+export interface KBItem { id: string; text: string; meta: KBMeta; score?: number; }
+export interface KBBin {
+  dim: number;
+  count: number;
+  items: KBItem[];
+  vec: Float32Array; // normalized vectors, length = count*dim
 }
 
-let KB: KBItem[] | null = null;
+let BIN: KBBin | null = null;
 
 export function loadKB(): KBItem[] {
-  if (KB) return KB;
-  const p = path.join(process.cwd(), "data", "knowledge.json");
-  const raw = fs.readFileSync(p, "utf8");
-  // We trust our builder to produce the correct shape
-  KB = JSON.parse(raw) as KBItem[];
-  return KB!;
+  return loadKBBin().items;
 }
 
-function cosine(a: number[], b: number[]): number {
-  let dot = 0;
-  let na = 0;
-  let nb = 0;
-  const len = Math.min(a.length, b.length);
-  for (let i = 0; i < len; i++) {
-    const ai = a[i];
-    const bi = b[i];
-    dot += ai * bi;
-    na += ai * ai;
-    nb += bi * bi;
+export function loadKBBin(): KBBin {
+  if (BIN) return BIN;
+
+  const metaPath = path.join(process.cwd(), "data", "kb.meta.json");
+  const binPath  = path.join(process.cwd(), "data", "kb.vec.bin");
+
+  const metaRaw = fs.readFileSync(metaPath, "utf8");
+  const { dim, count, items } = JSON.parse(metaRaw) as { dim: number; count: number; items: KBItem[] };
+
+  const buf = fs.readFileSync(binPath); // Node Buffer
+  const vec = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
+
+  if (vec.length !== count * dim) {
+    throw new Error(`Vector file length mismatch: have ${vec.length}, expected ${count*dim}`);
   }
-  const denom = Math.sqrt(na) * Math.sqrt(nb) + 1e-9;
-  return dot / denom;
+
+  BIN = { dim, count, items, vec };
+  return BIN!;
 }
 
-export function topKByCosine(
-  queryVec: number[],
-  items: KBItem[],
-  k = 12
-): KBItem[] {
-  return items
-    .map((it) => ({ ...it, score: cosine(queryVec, it.embedding) }))
-    .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
-    .slice(0, k);
+// cosine with stored unit vectors -> just dot / ||q||
+function cosineToUnit(query: number[], unitVec: Float32Array, base: number, dim: number): number {
+  let dot = 0, qnorm = 0;
+  for (let j=0;j<dim;j++){
+    const qj = query[j];
+    dot   += qj * unitVec[base + j];
+    qnorm += qj * qj;
+  }
+  return dot / (Math.sqrt(qnorm) + 1e-9);
+}
+
+export function topKByCosine(queryVec: number[], items: KBItem[], k = 12): KBItem[] {
+  const { dim, vec } = loadKBBin();
+  // items are in the same order as vectors; index by position
+  // build an index map once
+  const index = new Map<string, number>();
+  const all = loadKBBin().items;
+  for (let i=0;i<all.length;i++) index.set(all[i].id, i);
+
+  const scored: KBItem[] = [];
+  for (const it of items) {
+    const idx = index.get(it.id);
+    if (idx == null) continue;
+    const score = cosineToUnit(queryVec, vec, idx*dim, dim);
+    scored.push({ ...it, score });
+  }
+  return scored.sort((a,b)=>(b.score ?? 0)-(a.score ?? 0)).slice(0,k);
 }

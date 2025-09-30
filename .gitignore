@@ -41,7 +41,10 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# data
+# data (binary vectors + metadata)
 data/*.csv
-!data/knowledge.json
+data/knowledge.json
 data/knowledge.partial.json
+!data/kb.meta.json
+!data/kb.vec.bin
+
