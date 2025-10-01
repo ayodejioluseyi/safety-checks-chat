@@ -151,7 +151,7 @@ export default function Home() {
             priority
           />
         </Link>
-        <div className="si-header__title">SafeIntel AI</div>
+        <div className="si-header__title">AI</div>
       </header>
 
       {/* Main */}
