@@ -201,3 +201,14 @@ html, body {
 .si-chip:active {
   transform: translateY(1px);
 }
+
+.si-section {
+  margin-top: 8px;
+}
+
+.si-section-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #6b7280;
+  margin: 4px 0;
+}

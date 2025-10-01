@@ -13,6 +13,23 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 function toIsoDate(s?: string): string | undefined {
   if (!s) return undefined;
+
+  // 1) Explicit DD/MM/YYYY or DD-MM-YYYY (UK)
+  const uk = s.match(/\b(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})\b/);
+  if (uk) {
+    const dd = parseInt(uk[1], 10);
+    const mm = parseInt(uk[2], 10);
+    const yyyy = parseInt(uk[3], 10);
+    if (dd >= 1 && dd <= 31 && mm >= 1 && mm <= 12) {
+      return `${yyyy}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
+    }
+  }
+
+  // 2) Explicit ISO YYYY-MM-DD
+  const iso = s.match(/\b(20\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\b/);
+  if (iso) return iso[0];
+
+  // 3) Fallback to chrono
   const results = chrono.parse(s, new Date(), { forwardDate: true });
   const d = results[0]?.date();
   if (!d) return undefined;
@@ -43,6 +60,14 @@ const TYPE_ALIASES: Record<string, string> = {
 
 function detectType(userMsg: string): string | undefined {
   const msg = userMsg.toLowerCase();
+
+  // Fuzzy handling for fridge am/pm (friedge, frdge, etc.)
+  if (/(fridge|frdge|friedge)/.test(msg)) {
+    if (/\bpm\b/.test(msg)) return "Fridge_PM";
+    if (/\bam\b/.test(msg)) return "Fridge_AM";
+  }
+
+  // Exact/alias matches
   for (const k of Object.keys(TYPE_ALIASES)) {
     if (msg.includes(k)) return TYPE_ALIASES[k];
   }
@@ -77,7 +102,32 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Server missing OPENAI_API_KEY" }, { status: 500 });
     }
 
-    // Embed the query
+    // Load KB once
+    const kb = loadKB();
+
+    // ---- Exact-match fast path (type + restaurant key + date) ----
+    const ridMatch = userMsg.match(/\b(restaurant|site|key)\s*#?\s*(\d+)\b/i);
+    const rid = ridMatch?.[2];
+    const dateIso = toIsoDate(userMsg);
+    const typeGuess = detectType(userMsg);
+
+    if (rid && dateIso && typeGuess) {
+      const exact = kb.find(
+        (x) =>
+          x.meta?.restaurant_key === rid &&
+          (x.meta?.date_iso ?? "").startsWith(dateIso) &&
+          x.meta?.type === typeGuess
+      );
+      if (exact) {
+        return NextResponse.json({
+          answer: exact.text,
+          used: [exact.id],
+          narrowedCount: 1,
+        });
+      }
+    }
+
+    // ---- Embed the query for semantic retrieval ----
     const emb = await openai.embeddings.create({
       model: "text-embedding-3-small",
       input: userMsg,
@@ -87,13 +137,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Embedding failed" }, { status: 500 });
     }
 
-    // Retrieve context
-    const kb = loadKB();
+    // ---- Retrieve context ----
     const narrowed = prefilter(kb, userMsg);
     const searchSpace = narrowed.length ? narrowed : kb;
     const top = topKByCosine(qvec, searchSpace, 12);
 
-    // If nothing relevant, short, friendly reply (and no context sent to model)
     if (top.length === 0) {
       return NextResponse.json({
         answer: "I don’t have that record in the current dataset. Try one of the suggestions below.",
@@ -123,7 +171,6 @@ Be concise and human-like.
     });
 
     const raw = chat.choices[0]?.message?.content ?? "";
-    // Belt-and-braces: strip any stray "[id:...]" if a model ever adds it
     const cleaned = raw.replace(/\s*\[id:[^\]]+\]/gi, "").replace(/\s{2,}/g, " ").trim();
 
     return NextResponse.json({

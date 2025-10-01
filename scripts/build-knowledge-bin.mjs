@@ -2,8 +2,8 @@
 import dotenv from "dotenv";
 dotenv.config({ path: ".env.local", override: true });
 
-import fs from "fs";
-import path from "path";
+import fs from "node:fs";
+import path from "node:path";
 import { parse } from "csv-parse/sync";
 import OpenAI from "openai";
 
@@ -17,6 +17,8 @@ const YEAR    = args.year ? parseInt(args.year,10) : null;
 const TYPES   = args.types ? args.types.split(",") : null;
 const LIMIT   = args.limit ? parseInt(args.limit,10) : null;
 const MAXFACTS= args.maxFacts ? parseInt(args.maxFacts,10) : null;
+const MONTH = args.month || null; // e.g. "2025-08"
+
 
 // ---------- constants ----------
 const ALL_TYPES = [
@@ -55,6 +57,7 @@ function makeSentence(row, type) {
 
 function factsFromRow(row, rowIdx, activeTypes) {
   const iso = toISO(get(row,"date"));
+  if (MONTH && iso && !iso.startsWith(MONTH)) return [];
   if (YEAR && (!iso || !iso.startsWith(String(YEAR)))) return [];
   if (SINCE && iso && iso < SINCE) return [];
   const facts=[];
@@ -82,6 +85,7 @@ const sleep = ms => new Promise(r=>setTimeout(r,ms));
 async function main(){
   if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY missing (.env.local)");
   const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const EMBED_MODEL = process.env.EMBED_MODEL || "text-embedding-3-small";
 
   const csvPath = path.join(process.cwd(),"data","checks.csv");
   if (!fs.existsSync(csvPath)) throw new Error(`CSV not found at ${csvPath}`);
@@ -91,7 +95,7 @@ async function main(){
   const rowsToUse = LIMIT ? rows.slice(0, LIMIT) : rows;
 
   console.log("📦 Rows:", rows.length, "| using:", rowsToUse.length);
-  console.log("⚙️ Filters:", { YEAR, SINCE, TYPES: ACTIVE_TYPES });
+  console.log("⚙️ Filters:", { YEAR, SINCE, MONTH, TYPES: ACTIVE_TYPES });
 
   // Build facts
   let facts=[];
@@ -104,12 +108,41 @@ async function main(){
   const seen = new Set();
   facts = facts.filter(f=>{ if (seen.has(f.text)) return false; seen.add(f.text); return true; });
 
+  // ---- sanity: show which months made it through filtering (pre-cap) ----
+  const byMonth = new Set(facts.map(f => (f.meta?.date_iso ?? "").slice(0,7)));
+  console.log("📅 Months present (pre-cap):", [...byMonth].sort());
+  console.log("🧾 Facts (pre-cap):", facts.length);
+
+
+  // Sort August facts oldest -> newest so the cap starts from the first day
+  facts.sort((a, b) => {
+    const da = (a.meta?.date_iso ?? "");
+    const db = (b.meta?.date_iso ?? "");
+    if (da !== db) return da < db ? -1 : 1;              // date asc
+    const ka = (a.meta?.restaurant_key ?? "");
+    const kb = (b.meta?.restaurant_key ?? "");
+    if (ka !== kb) return ka < kb ? -1 : 1;              // tie-breaker
+    return (a.meta?.type ?? "").localeCompare(b.meta?.type ?? "");
+  });
+
+  if (MONTH) {
+  const offMonth = facts.find(f => !(f.meta?.date_iso ?? "").startsWith(MONTH));
+  if (offMonth) throw new Error(`Out-of-month fact detected: ${offMonth.meta?.date_iso} for ${offMonth.id}`);
+  }
+
+
+  // Now apply the cap
   if (MAXFACTS && facts.length > MAXFACTS) {
-    console.log(`✂️ Trimming facts from ${facts.length} to ${MAXFACTS}`);
+    console.log(`✂️ Trimming facts from ${facts.length} to ${MAXFACTS} (oldest first)`);
     facts = facts.slice(0, MAXFACTS);
   }
 
+  // ---- sanity: confirm month(s) and count after sort/cap ----
+  const byMonthAfter = new Set(facts.map(f => (f.meta?.date_iso ?? "").slice(0,7)));
+  console.log("📅 Months present (post-cap):", [...byMonthAfter].sort());
   console.log("🧾 Facts to embed:", facts.length);
+
+
   if (facts.length === 0) throw new Error("No facts to embed.");
 
   // Embed in batches
@@ -121,7 +154,7 @@ async function main(){
     let ok=false, tries=0;
     while(!ok && tries<5){
       try{
-        const resp = await client.embeddings.create({ model: "text-embedding-3-small", input: b.map(x=>x.text) });
+        const resp = await client.embeddings.create({ model: EMBED_MODEL, input: b.map(x=>x.text) });
         if (!DIM) DIM = resp.data[0].embedding.length;
 
         // Normalize each vector to unit length (better cosine)

@@ -3,7 +3,6 @@ export const runtime = "nodejs";
 import { NextRequest, NextResponse } from "next/server";
 import { loadKB, type KBItem } from "@/lib/search";
 
-// ---- aliases (same as chat) ----
 const TYPE_ALIASES: Record<string, string> = {
   "opening": "Opening_Check",
   "open": "Opening_Check",
@@ -41,7 +40,6 @@ function humanType(t: string): string {
   return t.replace(/_/g, " ").replace(/\bAM\b/, "AM").replace(/\bPM\b/, "PM");
 }
 
-// ---- type guard: ensure date_iso/type/restaurant_key are present strings
 type WithRequiredMeta = KBItem & {
   meta: { date_iso: string; type: string; restaurant_key: string; restaurant_name?: string };
 };
@@ -57,53 +55,68 @@ function hasDateTypeKey(it: KBItem): it is WithRequiredMeta {
   );
 }
 
-type Body = { lastUserText?: string };
+type Body = {
+  lastUserText?: string;
+  preferredTypes?: string[]; // internal names e.g. "Opening_Check"
+  limit?: number;
+};
 
 export async function POST(req: NextRequest) {
   try {
     const kb = loadKB();
-    const { lastUserText = "" } = (await req.json()) as Body;
+    const { lastUserText = "", preferredTypes = [], limit = 7 } = (await req.json()) as Body;
 
-    // hints from the user's failed query
+    // Parse hints from user's text (optional)
     const ridMatch = lastUserText.match(/\b(restaurant|site|key)\s*#?\s*(\d+)\b/i);
     const rid = ridMatch?.[2];
-
     const nameMatch = lastUserText.match(/restaurant\s+["“]?([^"\n\r]+?)["”]?(?:\s|$|\?|\.)/i);
     const name = nameMatch?.[1]?.trim().toLowerCase();
-
     const typeGuess = detectType(lastUserText);
 
-    // base set
+    // Base set
     let items: KBItem[] = kb;
-
-    // pre-filters (safe with optional chaining)
-    if (typeGuess) items = items.filter(x => x.meta?.type === typeGuess);
-    if (rid) items = items.filter(x => x.meta?.restaurant_key === rid);
+    if (typeGuess) items = items.filter((x) => x.meta?.type === typeGuess);
+    if (rid) items = items.filter((x) => x.meta?.restaurant_key === rid);
     if (!rid && name && name.length >= 3) {
-      items = items.filter(x => (x.meta?.restaurant_name ?? "").toLowerCase().includes(name));
+      items = items.filter((x) => (x.meta?.restaurant_name ?? "").toLowerCase().includes(name));
     }
-
-    // if filters gave nothing, fall back to all
     if (items.length === 0) items = kb;
 
-    // narrow to items that definitely have date/type/key, then sort by newest
-    const dated: WithRequiredMeta[] = items
-      .filter(hasDateTypeKey)
-      .sort((a, b) => (a.meta.date_iso < b.meta.date_iso ? 1 : -1));
+    // Only items with required meta, newest first
+    const dated = items.filter(hasDateTypeKey).sort((a, b) =>
+      a.meta.date_iso < b.meta.date_iso ? 1 : -1
+    );
 
-    // build up to 7 distinct prompts
-    const suggestions: string[] = [];
-    const seen = new Set<string>();
-    for (const it of dated) {
-      const { restaurant_key: key, date_iso, type } = it.meta;
-      const prompt = `${humanType(type)} for restaurant ${key} on ${toDDMMYYYY(date_iso)}`;
-      if (seen.has(prompt)) continue;
-      seen.add(prompt);
-      suggestions.push(prompt);
-      if (suggestions.length >= 7) break;
+    const seenPrompts = new Set<string>();
+    const usedIndexes = new Set<number>();
+    const out: string[] = [];
+
+    // Helper: add suggestion from item index if not duplicate
+    const addFrom = (idx: number) => {
+      const it = dated[idx];
+      const prompt = `${humanType(it.meta.type)} for restaurant ${it.meta.restaurant_key} on ${toDDMMYYYY(it.meta.date_iso)}`;
+      if (seenPrompts.has(prompt)) return false;
+      seenPrompts.add(prompt);
+      usedIndexes.add(idx);
+      out.push(prompt);
+      return true;
+    };
+
+    // 1) One per preferred type, in order
+    for (const t of preferredTypes) {
+      const idx = dated.findIndex((it) => it.meta.type === t);
+      if (idx >= 0) {
+        addFrom(idx);
+        if (out.length >= limit) break;
+      }
     }
 
-    return NextResponse.json({ suggestions });
+    // 2) Fill remaining with most recent overall (skipping duplicates)
+    for (let i = 0; i < dated.length && out.length < limit; i++) {
+      addFrom(i);
+    }
+
+    return NextResponse.json({ suggestions: out });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "suggestions error";
     return NextResponse.json({ suggestions: [], error: message }, { status: 500 });

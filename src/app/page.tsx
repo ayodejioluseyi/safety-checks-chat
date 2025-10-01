@@ -1,7 +1,7 @@
 "use client";
 import Image from "next/image";
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react"; // ⬅️ add useEffect
 
 type ChatRole = "user" | "assistant";
 type ChatMsg = { role: ChatRole; content: string; ts: number };
@@ -33,12 +33,46 @@ export default function Home() {
     {
       role: "assistant",
       content:
-        'Welcome to SafeIntel AI. Ask about food-safety checks, e.g. “Opening Check for restaurant 74 on 20/09/2025?”',
+        'Welcome to SafeIntel AI. Ask about food-safety checks, e.g. “Opening Check for restaurant 74 on 15/08/2025?”',
       ts: Date.now(),
     },
   ]);
   const [loading, setLoading] = useState<boolean>(false);
+
+  // ❯❯ suggestion chips shown only when a query fails
   const [chips, setChips] = useState<string[]>([]);
+
+  // ❯❯ always-visible examples
+  const [examples, setExamples] = useState<string[]>([]);
+
+  // Fetch 7 good examples on first load (prefer Fridge AM/PM, Opening, Closing)
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await fetch("/api/suggestions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            preferredTypes: [
+              "Opening_Check",
+              "Closing_Check",
+              "Fridge_AM",
+              "Fridge_PM",
+              "Cooking",
+              "Hot_Holding",
+              "Cold_Holding",
+            ],
+            limit: 7,
+          }),
+        });
+        const data = (await res.json()) as SuggestionAPIResponse;
+        setExamples(data.suggestions ?? []);
+      } catch {
+        setExamples([]);
+      }
+    })();
+  }, []);
+
 
   async function fetchSuggestions(lastUserText: string) {
     try {
@@ -62,7 +96,7 @@ export default function Home() {
     setMsgs((m) => [...m, { role: "user", content: text, ts: now }]);
     setInput("");
     setLoading(true);
-    setChips([]); // clear any previous chips
+    setChips([]); // clear any failure chips
 
     try {
       const res = await fetch("/api/chat", {
@@ -86,8 +120,8 @@ export default function Home() {
         { role: "assistant", content: reply, ts: Date.now() },
       ]);
 
-      // If we likely had no match, surface suggestions
-      const noContext = !data.used || data.used.length === 0 || /i don't have that record/i.test(reply);
+      // If we likely had no match, surface “did you mean” chips
+      const noContext = !data.used || data.used.length === 0 || /i don’t have that record/i.test(reply);
       if (noContext) {
         void fetchSuggestions(text);
       }
@@ -97,7 +131,6 @@ export default function Home() {
         ...m,
         { role: "assistant", content: `Error: ${message}`, ts: Date.now() },
       ]);
-      // optional: try suggestions even on error
       void fetchSuggestions(input);
     } finally {
       setLoading(false);
@@ -118,10 +151,10 @@ export default function Home() {
             priority
           />
         </Link>
-        <div className="si-header__title">AI</div>
+        <div className="si-header__title">SafeIntel AI</div>
       </header>
 
-      {/* Main content */}
+      {/* Main */}
       <main className="si-main">
         <div className="si-chat" role="log" aria-live="polite">
           {msgs.map((m, i) => (
@@ -150,26 +183,11 @@ export default function Home() {
           )}
         </div>
 
-        {/* Suggestion chips (show when present) */}
-        {chips.length > 0 && (
-          <div className="si-chips" role="navigation" aria-label="Suggestions">
-            {chips.map((c, idx) => (
-              <button
-                key={idx}
-                className="si-chip"
-                onClick={() => void send(c)}
-                title={c}
-              >
-                {c}
-              </button>
-            ))}
-          </div>
-        )}
-
+        {/* Composer */}
         <div className="si-composer">
           <input
             className="si-input"
-            placeholder='Try: "Fridge PM for The Picture Drome on 29/09/2025?"'
+            placeholder='Try: "Fridge PM for restaurant 74 on 15/08/2025?"'
             value={input}
             onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
               setInput(e.target.value)
@@ -184,9 +202,47 @@ export default function Home() {
             onClick={() => void send()}
             disabled={loading || !input.trim()}
           >
-            Ask SafeIntel
+            Send
           </button>
         </div>
+
+        {/* Always-visible Examples (under the input) */}
+        {examples.length > 0 && (
+          <div className="si-section">
+            <div className="si-section-title">Examples</div>
+            <div className="si-chips" role="navigation" aria-label="Examples">
+              {examples.map((c, idx) => (
+                <button
+                  key={`ex-${idx}`}
+                  className="si-chip"
+                  onClick={() => void send(c)}
+                  title={c}
+                >
+                  {c}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Failure suggestions (only when a query misses) */}
+        {chips.length > 0 && (
+          <div className="si-section">
+            <div className="si-section-title">Did you mean</div>
+            <div className="si-chips" role="navigation" aria-label="Suggestions">
+              {chips.map((c, idx) => (
+                <button
+                  key={`sg-${idx}`}
+                  className="si-chip"
+                  onClick={() => void send(c)}
+                  title={c}
+                >
+                  {c}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         <p className="si-hint">Answers come strictly from your CSV-derived data.</p>
       </main>
