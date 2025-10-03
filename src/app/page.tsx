@@ -4,6 +4,8 @@
 import Image from "next/image";
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { APP_NAME, WELCOME } from "./brand";
+
 
 type ChatRole = "user" | "assistant";
 type ChatMsg = { role: ChatRole; content: string; ts: number };
@@ -99,8 +101,7 @@ export default function Home() {
   const [msgs, setMsgs] = useState<ChatMsg[]>([
     {
       role: "assistant",
-      content:
-        'Welcome to SafeIntel AI. Ask about food-safety checks, e.g. “Opening Check for restaurant 74 on 15/08/2025?”',
+      content: WELCOME,
       ts: Date.now(),
     },
   ]);
@@ -240,17 +241,17 @@ export default function Home() {
     <div className="si-page">
       {/* Sticky header */}
       <header className="si-header">
-        <Link href="/" aria-label="SafeIntel AI home">
+        <Link href="/" aria-label={`${APP_NAME} home`}>
           <Image
             className="si-header__logo"
             src="/safeintel-logo.png"
-            alt="SafeIntel AI"
+            alt={APP_NAME}
             width={1024}
             height={268}
             priority
           />
         </Link>
-        <div className="si-header__title">SafeIntel AI</div>
+        <div className="si-header__title">{APP_NAME}</div>
       </header>
 
       {/* Main */}

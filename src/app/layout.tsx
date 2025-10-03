@@ -1,6 +1,9 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import { APP_NAME } from "./brand";
+
+
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -12,10 +15,7 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
-export const metadata: Metadata = {
-  title: "SafeIntel AI",
-  description: "Ask about restaurant food-safety checks from your internal data",
-};
+export const metadata = { title: APP_NAME, description: "…" };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
