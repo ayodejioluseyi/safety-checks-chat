@@ -352,9 +352,8 @@ export default function Home() {
           </div>
         )}
 
-        <p className="si-hint">
-          Answers come strictly from your CSV-derived data.
-        </p>
+        <p className="si-hint">Answers come strictly from your internal data.</p>
+
       </main>
     </div>
   );
