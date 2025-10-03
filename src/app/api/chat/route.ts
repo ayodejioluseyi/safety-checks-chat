@@ -11,10 +11,12 @@ interface ChatBody { messages: ChatMessage[] }
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+/* ---------- helpers: date + types + friendly summaries ---------- */
+
 function toIsoDate(s?: string): string | undefined {
   if (!s) return undefined;
 
-  // 1) Explicit DD/MM/YYYY or DD-MM-YYYY (UK)
+  // DD/MM/YYYY or DD-MM-YYYY (UK)
   const uk = s.match(/\b(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})\b/);
   if (uk) {
     const dd = parseInt(uk[1], 10);
@@ -25,11 +27,11 @@ function toIsoDate(s?: string): string | undefined {
     }
   }
 
-  // 2) Explicit ISO YYYY-MM-DD
+  // ISO YYYY-MM-DD
   const iso = s.match(/\b(20\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\b/);
   if (iso) return iso[0];
 
-  // 3) Fallback to chrono
+  // Chrono fallback
   const results = chrono.parse(s, new Date(), { forwardDate: true });
   const d = results[0]?.date();
   if (!d) return undefined;
@@ -61,18 +63,117 @@ const TYPE_ALIASES: Record<string, string> = {
 function detectType(userMsg: string): string | undefined {
   const msg = userMsg.toLowerCase();
 
-  // Fuzzy handling for fridge am/pm (friedge, frdge, etc.)
+  // Tolerate fridge typos
   if (/(fridge|frdge|friedge)/.test(msg)) {
     if (/\bpm\b/.test(msg)) return "Fridge_PM";
     if (/\bam\b/.test(msg)) return "Fridge_AM";
   }
 
-  // Exact/alias matches
   for (const k of Object.keys(TYPE_ALIASES)) {
     if (msg.includes(k)) return TYPE_ALIASES[k];
   }
   return undefined;
 }
+
+function humanType(t: string | undefined): string {
+  if (!t) return "check";
+  return t.replace(/_/g, " ").replace(/\bAM\b/, "AM").replace(/\bPM\b/, "PM");
+}
+
+function ordinal(n: number): string {
+  const s = ["th", "st", "nd", "rd"], v = n % 100;
+  return n + (s[(v - 20) % 10] || s[v] || s[0]);
+}
+
+function humanDate(iso?: string): string {
+  if (!iso || iso.length < 10) return iso ?? "";
+  const [y, m, d] = iso.slice(0, 10).split("-").map(Number);
+  const date = new Date(Date.UTC(y, m - 1, d));
+  const month = date.toLocaleString("en-GB", { month: "long" });
+  return `${ordinal(d)} ${month} ${y}`;
+}
+
+// Parse numbers from our KB sentence. If it fails, return null.
+function parseStatsFromText(text: string): {
+  checks: number; completed: number; passed: number; compPct: number; passPct: number;
+} | null {
+  const m = text.match(/checks=(\d+)\s+completed=(\d+)\s+passed=(\d+)\s+\(comp=(\d+)%?,\s*pass=(\d+)%?\)/i);
+  if (!m) return null;
+  return {
+    checks: parseInt(m[1], 10),
+    completed: parseInt(m[2], 10),
+    passed: parseInt(m[3], 10),
+    compPct: parseInt(m[4], 10),
+    passPct: parseInt(m[5], 10),
+  };
+}
+
+type Stats = {
+  checks: number; completed: number; passed: number; compPct: number; passPct: number;
+};
+
+function tailFor({ checks, completed, passed, compPct, passPct }: Stats): string {
+  // Derived counts
+  const notCompleted = Math.max(checks - completed, 0);
+  const failed = Math.max(completed - passed, 0);
+
+  // No checks at all
+  if (checks === 0) return " No checks were recorded for this entry.";
+
+  // Perfect
+  if (compPct === 100 && passPct === 100) return " Well done — keep it up.";
+
+  // All passed but not all completed
+  if (passPct === 100 && compPct >= 90 && notCompleted > 0) {
+    return ` All checks passed; ${notCompleted} ${notCompleted === 1 ? "check remains" : "checks remain"} to reach 100% completion.`;
+  }
+
+  // Fully completed but a few failed
+  if (compPct === 100 && passPct >= 95 && failed > 0) {
+    return ` Great completion — ${failed} ${failed === 1 ? "item failed" : "items failed"}. Please review and monitor.`;
+  }
+
+  // Mixed gaps (minor)
+  if (passPct >= 90) {
+    const parts: string[] = [];
+    if (notCompleted > 0) parts.push(`${notCompleted} not completed`);
+    if (failed > 0) parts.push(`${failed} failed`);
+    return ` Some gaps: ${parts.join(", ")}. Please follow up.`;
+  }
+
+  // Larger issues
+  if (passPct >= 70) {
+    const parts: string[] = [];
+    if (notCompleted > 0) parts.push(`${notCompleted} not completed`);
+    if (failed > 0) parts.push(`${failed} failed`);
+    return ` Noticeable issues — ${parts.join(", ")}. Corrective action is recommended.`;
+  }
+
+  // Significant issues
+  const parts: string[] = [];
+  if (notCompleted > 0) parts.push(`${notCompleted} not completed`);
+  if (failed > 0) parts.push(`${failed} failed`);
+  return ` Several items did not meet standards (${parts.join(", ")}). Immediate corrective action is advised.`;
+}
+
+// Deterministic humanisation for exact matches
+function summariseExact(item: KBItem): string {
+  const dn = humanDate(item.meta?.date_iso);
+  const tHuman = humanType(item.meta?.type).toLowerCase();
+  const name = item.meta?.restaurant_name?.trim() || `restaurant ${item.meta?.restaurant_key ?? ""}`;
+  const stats = parseStatsFromText(item.text);
+
+  if (!stats) {
+    // Fallback to original text if parsing ever fails
+    return item.text.replace(/\s*\[id:[^\]]+\]/gi, "").trim();
+  }
+
+  const { checks, completed, passed, compPct, passPct } = stats;
+
+  const base = `On ${dn}, the ${tHuman} for ${name} had a total of ${checks} checks, with ${completed} completed and ${passed} passed, resulting in ${compPct}% completion and ${passPct}% pass rate.`;
+  return base + tailFor({ checks, completed, passed, compPct, passPct });
+}
+
 
 function prefilter(kb: KBItem[], userMsg: string): KBItem[] {
   const ridMatch = userMsg.match(/\b(restaurant|site|key)\s*#?\s*(\d+)\b/i);
@@ -89,6 +190,8 @@ function prefilter(kb: KBItem[], userMsg: string): KBItem[] {
   if (typeGuess) items = items.filter(x => (x.meta?.type ?? "") === typeGuess);
   return items;
 }
+
+/* ---------- route ---------- */
 
 export async function POST(req: NextRequest) {
   try {
@@ -120,7 +223,7 @@ export async function POST(req: NextRequest) {
       );
       if (exact) {
         return NextResponse.json({
-          answer: exact.text,
+          answer: summariseExact(exact), // ← friendly, deterministic summary
           used: [exact.id],
           narrowedCount: 1,
         });
@@ -154,9 +257,10 @@ export async function POST(req: NextRequest) {
 
     const system = `
 You are a helpful assistant for restaurant food-safety checks.
-Answer ONLY from the "Context" lines. If the context doesn't contain the answer, say you don't have that record.
-When dates like "today" are used, interpret them in Europe/London and include the explicit date (YYYY-MM-DD).
-Be concise and human-like.
+Answer ONLY from the "Context" lines. Do not invent data. If the context doesn't contain the answer, say you don't have that record.
+Rewrite the result as a clear, human summary like:
+"On 31st August 2025, the opening check for Grand Cafe had a total of 13 checks, with 13 completed and 13 passed, resulting in 100% completion and 100% pass rate."
+Use UK dates with an ordinal day (e.g., 1st/2nd/3rd/4th) and full month. If both completion and pass are 100%, end with "Well done — keep it up." Keep it to one or two sentences.
 `.trim();
 
     const prompt = `Context:\n${context}\n\nUser question: ${userMsg}`;
